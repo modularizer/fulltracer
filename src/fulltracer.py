@@ -63,10 +63,10 @@ class Config:
     parse: bool = True
     """Automatically parse the trace after stopping the tracer"""
 
-    depth_tab: str = "    "
+    depth_tab: str = ""
     """String to be used to indent the lines based on the depth of the stack"""
 
-    strip: bool = True
+    strip: bool = False
     """If True, the leading and trailing whitespaces are stripped from the lines"""
 
     DEFAULT: str = "%DEFAULT%"
@@ -85,9 +85,9 @@ class Config:
         if self.link == self.DEFAULT:
             self.link = HyperLinks.VSCODE_LINK if self.IDE == "vscode" else HyperLinks.PYCHARM_LINK
         if self.mode == self.DEFAULT:
-            self.mode = f"(%depth)%depth_indent{self.anchor}10{self.anchor}%line{self.anchor}{self.line_length + 10}{self.anchor}{Colors.GREEN}{self.link}{Colors.RESET_FMT}"
+            self.mode = f"(%depth)%depth_indent{self.anchor}10{self.anchor}%line{self.anchor}{self.line_length + 10}{self.anchor}{Colors.GREEN}{self.link} (%func){Colors.RESET_FMT}"
         if self.consecutive_mode == self.DEFAULT:
-            self.consecutive_mode = f" {self.anchor}10{self.anchor}%line{self.anchor}{self.line_length + 10}{self.anchor}{Colors.GREEN}{self.link}{Colors.RESET_FMT}"
+            self.consecutive_mode = f" {self.anchor}10{self.anchor}%line{self.anchor}{self.line_length + 10}{self.anchor}{Colors.GREEN}{self.link} (%func){Colors.RESET_FMT}"
 
 
 class FullTracer:
@@ -245,7 +245,7 @@ class FullTracer:
 
             if (not ignoring) and\
                     (trace_lines or event == "call") and \
-                    (max_depth is None or depth <= max_depth) and \
+                    ((not max_depth) or depth <= max_depth) and \
                     (filename_pattern is None or re.match(filename_pattern, filename)) and \
                     (func_name_pattern is None or re.match(func_name_pattern, func_name)):
                 try:
@@ -260,9 +260,13 @@ class FullTracer:
                 if line_pattern is None or re.search(line_pattern, line):
                     consective = (filename, func_name) == tuple(last_file_func_line[:2]) and line_no == (last_file_func_line[2] + 1)
                     s = consective_mode if consective_mode and consective else mode
+
+                    same_line = filename == last_file_func_line[0] and line_no == last_file_func_line[-1]
+                    formatted_func_name = func_name if not same_line else f"{last_file_func_line[1]}=>{func_name}"
+
                     linked = link in s
                     s = s.replace("%file", filename)
-                    s = s.replace("%func", func_name)
+                    s = s.replace("%func", formatted_func_name)
                     s = s.replace("%lineno", str(line_no))
                     s = s.replace("%event", event)
 
@@ -285,32 +289,53 @@ class FullTracer:
                             n = len(re.findall("\033", x))
                             x += " "*(int(v) - len(x) + n*4 + int(n>0))
 
-                    if not (ignore_unfound_lines and not line_found):
-                        self.parsed_string += "\t" + x + "\n"
+                    file_func_line = (filename, formatted_func_name, line_no)
 
-                    self.parsed_trace.append(s)
-                    last_file_func_line = (filename, func_name, line_no)
+                    if not (ignore_unfound_lines and not line_found):
+                        if same_line:
+                            self.parsed_trace.pop()
+                        self.parsed_trace.append(x)
+                        last_file_func_line = file_func_line
             else:
-                print(f"ignoring {filename=} {func_name=} {line_no=} {event=} {depth=}")
                 ignoring = depth
+        self.parsed_string = "\n\t".join(self.parsed_trace)
         return self.parsed_string
 
     def __iter__(self):
         return iter(self.parsed_trace)
 
     def __repr__(self):
-        return f"{self.__class__.__name__}({len(self.parsed_trace)}/{len(self.trace)})\n{self.parsed_string}"
+        return f"{self.__class__.__name__}({len(self.parsed_trace)}/{len(self.trace)})\n\t{self.parsed_string}"
 
 
 def main():
     parser = argparse.ArgumentParser(description='Python CLI that wraps scripts with FullTracer')
     parser.add_argument('script', type=str, help='Python script to execute')
+    parser.add_argument('--anchor', type=str, default=Config.DEFAULT, help='Anchor character used to pad lines')
+    parser.add_argument('--quotation-replacement', type=str, default=Config.DEFAULT, help='Character used to replace quotation marks in the output')
+    parser.add_argument('--line-length', type=int, default=Config.line_length, help='Max expected length of a line in the source code')
+    parser.add_argument('--IDE', type=str, default=Config.DEFAULT, help='IDE in which the code is being run')
+    parser.add_argument('--not-found', type=str, default=Config.DEFAULT, help='String to be used when the source code file is not found')
+    parser.add_argument('--filename-pattern', type=str, default=Config.DEFAULT, help='Regex pattern to match the filename')
+    parser.add_argument('--func-name-pattern', type=str, default=Config.DEFAULT, help='Regex pattern to match the function name')
+    parser.add_argument('--line-pattern', type=str, default=Config.DEFAULT, help='Regex pattern to match the line number')
+    parser.add_argument('--ignore-unfound-lines', action='store_true', default=Config.ignore_unfound_lines, help='If set, lines not found in the source code are not included in the output')
+    parser.add_argument('--max-depth', type=int, default=0, help='Maximum depth of the stack to be parsed')
+    parser.add_argument('--trace-lines', action='store_true', default=Config.trace_lines, help='If set, both function calls and lines are traced')
+    parser.add_argument('--parse', action='store_true', default=Config.parse, help='Automatically parse the trace after stopping the tracer')
+    parser.add_argument('--depth-tab', type=str, default=Config.DEFAULT, help='String to be used to indent the lines based on the depth of the stack')
+    parser.add_argument('--strip', action='store_true', default=Config.strip, help='If set, leading and trailing whitespaces are stripped from the lines')
+
     args = parser.parse_args()
 
-    with FullTracer() as ft:
+    config_args = {k: v for k, v in vars(args).items() if v != Config.DEFAULT and k != "script"}
+    config = Config(**config_args)
+
+    with FullTracer(**config.__dict__) as ft:
         # This will run the script as if it were the "__main__" module
         runpy.run_path(args.script, run_name="__main__")
     print(ft)
+
 
 
 if __name__ == '__main__':
