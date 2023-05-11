@@ -1,0 +1,2 @@
+[console_scripts]
+fulltrace = fulltracer:main
